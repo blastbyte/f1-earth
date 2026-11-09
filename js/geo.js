@@ -26,60 +26,6 @@ export function centroid(coords) {
   return [(w + e) / 2, (s + n) / 2];
 }
 
-// Resample a polyline to points roughly `step` metres apart. Returns [{p, d}] with cumulative distance.
-export function densify(coords, step = 20) {
-  const out = [{ p: coords[0], d: 0 }];
-  let dist = 0;
-  for (let i = 1; i < coords.length; i++) {
-    const a = coords[i - 1], b = coords[i];
-    const len = haversine(a, b);
-    const n = Math.max(1, Math.ceil(len / step));
-    for (let k = 1; k <= n; k++) {
-      const t = k / n;
-      out.push({ p: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], d: dist + len * t });
-    }
-    dist += len;
-  }
-  return out;
-}
-
-// Offset a point by metres east/north.
-function offset(p, dx, dy) {
-  const lat = toRad(p[1]);
-  return [p[0] + (dx / (R * Math.cos(lat))) * (180 / Math.PI), p[1] + (dy / R) * (180 / Math.PI)];
-}
-
-// Build short quad polygons along the track. Each one is extruded separately, so each
-// sits on the terrain at its own elevation (MapLibre places extrusions per feature).
-export function ribbonSegments(samples, width = 13) {
-  const half = width / 2;
-  const feats = [];
-  const normals = samples.map((s, i) => {
-    const a = samples[Math.max(0, i - 1)].p, b = samples[Math.min(samples.length - 1, i + 1)].p;
-    const lat = toRad(s.p[1]);
-    const dx = (b[0] - a[0]) * Math.cos(lat), dy = b[1] - a[1];
-    const l = Math.hypot(dx, dy) || 1;
-    return [-dy / l, dx / l];
-  });
-  for (let i = 0; i < samples.length - 1; i++) {
-    const a = samples[i].p, b = samples[i + 1].p;
-    const na = normals[i], nb = normals[i + 1];
-    const ring = [
-      offset(a, na[0] * half, na[1] * half),
-      offset(b, nb[0] * half, nb[1] * half),
-      offset(b, -nb[0] * half, -nb[1] * half),
-      offset(a, -na[0] * half, -na[1] * half)
-    ];
-    ring.push(ring[0]);
-    feats.push({
-      type: 'Feature',
-      properties: { i, e: 0, en: -1 },
-      geometry: { type: 'Polygon', coordinates: [ring] }
-    });
-  }
-  return feats;
-}
-
 // Point along the track at fraction t (0..1) of total distance, with heading in degrees.
 export function pointAt(samples, t) {
   const total = samples[samples.length - 1].d;
@@ -145,10 +91,10 @@ function sampleTile(tile, fx, fy) {
   return (h(x0, y0) * (1 - tx) + h(x0 + 1, y0) * tx) * (1 - ty) + (h(x0, y0 + 1) * (1 - tx) + h(x0 + 1, y0 + 1) * tx) * ty;
 }
 
-// Returns elevations (metres) for each sample, smoothed a little to remove tile noise.
-export async function sampleElevations(samples, z = 14) {
+// Returns the terrain elevation (metres) at each [lon, lat] point.
+export async function sampleElevations(points, z = 15) {
   const needed = new Map();
-  const locs = samples.map(({ p }) => {
+  const locs = points.map((p) => {
     const [tx, ty] = lonLatToTile(p[0], p[1], z);
     const x = Math.floor(tx), y = Math.floor(ty);
     const key = `${x}/${y}`;
@@ -157,12 +103,5 @@ export async function sampleElevations(samples, z = 14) {
   });
   const tiles = {};
   await Promise.all([...needed].map(async ([k, pr]) => { tiles[k] = await pr; }));
-  const raw = locs.map((l) => sampleTile(tiles[l.key], l.fx, l.fy));
-  // moving-average smoothing (closed loop)
-  const n = raw.length, w = 3;
-  return raw.map((_, i) => {
-    let sum = 0, c = 0;
-    for (let k = -w; k <= w; k++) { sum += raw[(i + k + n) % n]; c++; }
-    return sum / c;
-  });
+  return locs.map((l) => sampleTile(tiles[l.key], l.fx, l.fy));
 }

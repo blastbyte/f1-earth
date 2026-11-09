@@ -222,3 +222,25 @@ body.touch .desktop-only { display: none; }
   body:has(#panel:not([hidden])) .help { display: none; }
   .elev-stats { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ---------- Cockpit view (Fly a lap) ---------- */
+.cockpit { position: absolute; inset: 0; z-index: 20; pointer-events: none; overflow: hidden; }
+.cockpit[hidden] { display: none; }
+.cockpit-car { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); width: max(100vw, 150vh); height: auto; max-height: 100vh;
+  filter: drop-shadow(0 -4px 18px rgba(0,0,0,.35)); }
+.ck-gear { font: 700 40px/1 system-ui, sans-serif; fill: #fff; }
+.ck-speed { font: 600 17px/1 ui-monospace, Menlo, Consolas, monospace; fill: var(--gold); }
+.lap-hud { position: absolute; top: calc(12px + var(--safe-t)); left: 12px; display: flex; align-items: center; gap: 12px; padding: 6px 14px 6px 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px; pointer-events: auto; }
+.lap-time { font: 600 16px/1 ui-monospace, Menlo, Consolas, monospace; min-width: 62px; }
+.pedals { display: flex; gap: 4px; height: 26px; }
+.pedal { width: 7px; height: 100%; background: rgba(255,255,255,.12); border-radius: 3px; overflow: hidden; display: flex; align-items: flex-end; }
+.pedal b { display: block; width: 100%; height: 100%; transform-origin: bottom; transform: scaleY(0); }
+.pedal.brake b { background: var(--red); }
+.pedal.throttle b { background: var(--green); }
+.lap-fade { position: absolute; inset: 0; z-index: 19; background: #000; opacity: 0; pointer-events: none; transition: opacity .25s ease; }
+.lap-fade.on { opacity: 1; }
+body.lap-mode .brand, body.lap-mode .toolbar, body.lap-mode .popover, body.lap-mode .panel, body.lap-mode .drawer,
+body.lap-mode .chip, body.lap-mode .help, body.lap-mode .maplibregl-ctrl-group, body.lap-mode .maplibregl-ctrl-scale,
+body.lap-mode .cm { display: none !important; }
+body.lap-mode .maplibregl-ctrl-bottom-right { z-index: 21; bottom: auto; top: calc(8px + var(--safe-t)); max-width: calc(100vw - 250px); }
