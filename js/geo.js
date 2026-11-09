@@ -55,7 +55,9 @@ function lonLatToTile(lon, lat, z) {
   return [x, y];
 }
 
-function loadTile(z, x, y) {
+// Loads and decodes a terrain tile. Tiles are kept only when `keep` is set (the ones
+// sampled along a track); the rest are passed straight on to the map.
+export function loadTile(z, x, y, keep = true) {
   const key = `${z}/${x}/${y}`;
   if (tileCache.has(key)) return tileCache.get(key);
   const promise = new Promise((resolve, reject) => {
@@ -71,8 +73,10 @@ function loadTile(z, x, y) {
     img.onerror = () => reject(new Error('tile ' + key));
     img.src = TERRARIUM_URL.replace('{z}', z).replace('{x}', x).replace('{y}', y);
   });
-  tileCache.set(key, promise);
-  promise.catch(() => tileCache.delete(key));
+  if (keep) {
+    tileCache.set(key, promise);
+    promise.catch(() => tileCache.delete(key));
+  }
   return promise;
 }
 
@@ -104,4 +108,49 @@ export async function sampleElevations(points, z = 15) {
   const tiles = {};
   await Promise.all([...needed].map(async ([k, pr]) => { tiles[k] = await pr; }));
   return locs.map((l) => sampleTile(tiles[l.key], l.fx, l.fy));
+}
+
+// [[west, south], [east, north]] of a tile.
+export function tileBounds(z, x, y) {
+  const n = 2 ** z;
+  const lat = (ty) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * ty) / n))) * 180) / Math.PI;
+  return [[(x / n) * 360 - 180, lat(y + 1)], [((x + 1) / n) * 360 - 180, lat(y)]];
+}
+
+// Cut a road bed into terrain tile pixels (Terrarium RGBA, edited in place): level
+// with the road within `inner` metres of the centreline, blending back to the
+// original ground by `inner + 40` metres. `points` are [lon, lat], `elev` in metres.
+export function carveRoad(data, size, z, x, y, points, elev, halfWidth) {
+  const metres = (40075016.7 * Math.cos(toRad(points[0][1]))) / (2 ** z * size); // per pixel
+  const inner = Math.max(15, halfWidth + 1.5 * metres), outer = inner + 40;
+  const reach = Math.ceil(outer / metres);
+  const dist = new Float32Array(size * size).fill(Infinity);
+  const road = new Float32Array(size * size);
+  let touched = false;
+  for (let i = 0; i < points.length; i++) {
+    const [tx, ty] = lonLatToTile(points[i][0], points[i][1], z);
+    const fx = (tx - x) * size - 0.5, fy = (ty - y) * size - 0.5;
+    if (fx < -reach || fy < -reach || fx > size + reach || fy > size + reach) continue;
+    const x0 = Math.max(0, Math.floor(fx - reach)), x1 = Math.min(size - 1, Math.ceil(fx + reach));
+    const y0 = Math.max(0, Math.floor(fy - reach)), y1 = Math.min(size - 1, Math.ceil(fy + reach));
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        const d = Math.hypot(px - fx, py - fy) * metres;
+        const k = py * size + px;
+        if (d < dist[k]) { dist[k] = d; road[k] = elev[i]; touched = true; }
+      }
+    }
+  }
+  if (!touched) return;
+  for (let k = 0; k < dist.length; k++) {
+    if (dist[k] >= outer) continue;
+    const t = Math.min(1, Math.max(0, (dist[k] - inner) / (outer - inner)));
+    const w = 1 - t * t * (3 - 2 * t);
+    const o = k * 4;
+    const ground = data[o] * 256 + data[o + 1] + data[o + 2] / 256 - 32768;
+    const v = ground + (road[k] - ground) * w + 32768;
+    data[o] = Math.floor(v / 256);
+    data[o + 1] = Math.floor(v) % 256;
+    data[o + 2] = Math.min(255, Math.round((v - Math.floor(v)) * 256));
+  }
 }

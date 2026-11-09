@@ -6,9 +6,9 @@ const R = 6371008.8;
 const RAD = Math.PI / 180;
 
 export const TRACK_WIDTH = 13; // metres
-export const ROAD_LIFT = 0.45; // metres the road surface sits above the sampled terrain
+export const ROAD_LIFT = 0.3; // metres the road surface sits above the terrain's road bed
 const KERB_WIDTH = 1.7;
-const SKIRT_DEPTH = 3; // metres the embankments go below the lowest ground
+const SKIRT_DEPTH = 3; // metres the road's sides reach below its surface
 
 const wrapPi = (a) => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
 
@@ -130,38 +130,31 @@ export function elevationPoints(path) {
 }
 
 // Combine raw terrain samples (3 per section) into one smooth elevation per sample.
-// The road follows the upper envelope of the terrain under it: it never dips below
-// the ground (which would bury it), its gradient is limited to what a real road could
-// have, and it is carried over hollows on an embankment.
-const MAX_GRADIENT = 0.18;
+// The terrain data is coarse and noisy (buildings and trees show up as bumps), so the
+// road ignores raised blocks, has its gradient limited and is smoothed over a long
+// distance. The terrain itself is then cut to match the road (see carveRoad).
+const MAX_GRADIENT = 0.12;
+const slide = (arr, reach, pick) => arr.map((_, i) => {
+  let m = arr[i];
+  for (let k = -reach; k <= reach; k++) m = pick(m, arr[(((i + k) % arr.length) + arr.length) % arr.length]);
+  return m;
+});
 export function setElevation(path, raw) {
   const { n, ds } = path;
-  const top = new Array(n), low = new Array(n);
-  for (let i = 0; i < n; i++) {
-    top[i] = raw ? Math.max(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]) : 0;
-    low[i] = raw ? Math.min(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]) : 0;
-  }
-  let e = top.slice();
+  const low = new Array(n);
+  for (let i = 0; i < n; i++) low[i] = raw ? Math.min(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]) : 0;
+  // Morphological opening: removes raised blocks shorter than twice the reach
+  // (tree canopy, grandstands, buildings) but leaves real slopes where they are.
+  const reach = Math.ceil(150 / ds);
+  let e = slide(slide(low, reach, Math.min), reach, Math.max);
   const g = MAX_GRADIENT * ds;
   for (let pass = 0; pass < 2; pass++) {
     for (let i = 0; i < n; i++) e[i] = Math.max(e[i], e[(i - 1 + n) % n] - g);
     for (let i = n - 1; i >= 0; i--) e[i] = Math.max(e[i], e[(i + 1) % n] - g);
   }
-  e = smoothClosed(e, 10 / ds);
-  // put back what the smoothing shaved off the crests
-  const reach = Math.ceil(10 / ds);
-  const deficit = e.map((v, i) => {
-    let m = 0;
-    for (let k = -reach; k <= reach; k++) { const j = (i + k + n) % n; m = Math.max(m, top[j] - e[j]); }
-    return m;
-  });
-  const extra = smoothClosed(deficit, 6 / ds);
-  e = e.map((v, i) => v + extra[i]);
-  const base = smoothClosed(low, 6 / ds).map((v, i) => Math.min(v, low[i], e[i]));
+  e = smoothClosed(e, 60 / ds);
   e.push(e[0]);
-  base.push(base[0]);
   path.elev = e;
-  path.base = base; // ground level the embankments reach down to
   return e;
 }
 
@@ -230,10 +223,10 @@ export function buildMesh(path) {
       return { edge, outer };
     };
     const L = side(-1), Rt = side(1);
-    const e = elev[i], en = (e - min) / span, v = path.d[s], ground = path.base[i];
+    const e = elev[i], en = (e - min) / span, v = path.d[s];
     const at = (off) => [x + rx * off, y + ry * off];
     const pl = at(-L.outer), el = at(-L.edge), er = at(Rt.edge), pr = at(Rt.outer);
-    put(pl[0], pl[1], ground, -hw - kerb - 1, v, -SKIRT_DEPTH, en, 2, 0);
+    put(pl[0], pl[1], e, -hw - kerb - 1, v, -SKIRT_DEPTH, en, 2, 0);
     put(pl[0], pl[1], e, -hw - kerb, v, ROAD_LIFT, en, 2, 0);
     put(pl[0], pl[1], e, -hw - kerb, v, ROAD_LIFT, en, 1, 1);
     put(el[0], el[1], e, -hw, v, ROAD_LIFT, en, 1, 1);
@@ -242,7 +235,7 @@ export function buildMesh(path) {
     put(er[0], er[1], e, hw, v, ROAD_LIFT, en, 1, 1);
     put(pr[0], pr[1], e, hw + kerb, v, ROAD_LIFT, en, 1, 1);
     put(pr[0], pr[1], e, hw + kerb, v, ROAD_LIFT, en, 2, 0);
-    put(pr[0], pr[1], ground, hw + kerb + 1, v, -SKIRT_DEPTH, en, 2, 0);
+    put(pr[0], pr[1], e, hw + kerb + 1, v, -SKIRT_DEPTH, en, 2, 0);
   }
   let q = 0;
   for (let s = 0; s < n; s++) {
