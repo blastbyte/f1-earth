@@ -9,9 +9,9 @@ An interactive 3D globe of every circuit on the 2026 Formula 1 calendar. It work
 - **3D globe** with satellite imagery of land and oceans. Drag to rotate, scroll or pinch to zoom, right-drag or two-finger drag to tilt.
 - **All 24 venues on the original 2026 calendar**, each shown as a hotspot with its photo (from Wikipedia) and name. Bahrain and Saudi Arabia were cancelled in March 2026; they are still shown, marked as cancelled. The next race pulses gold.
 - **Seamless zoom** from orbit down to the track. The circuit outline is drawn on the ground from about zoom 5.
-- **Close-up 3D view**: terrain elevation, 3D OpenStreetMap buildings, named landmarks (gold labels), a 3D model of the track coloured by elevation, and the start/finish line.
+- **Close-up 3D view**: terrain elevation, 3D OpenStreetMap buildings, named landmarks (gold labels), and a textured 3D model of the track: smooth curves through the corners, a road surface that follows the terrain's elevation, asphalt with white edge lines, red and white kerbs in the corners and a chequered start/finish line. The model can be tinted by elevation from the Layers menu.
 - **Circuit info panel**: round, date, status, circuit length, laps, race distance, corners, lap record, first Grand Prix, and an elevation profile sampled along the lap. Hover or touch the profile to find that point on the track.
-- **Fly a lap**: the camera follows the racing line at 2× lap-record pace.
+- **Fly a lap**: a first-person lap from the cockpit. The car launches from the grid, brakes for corners, turns in and accelerates out, at roughly lap-record pace. Press Esc, the Exit button or the map to stop.
 - **Orbit** around the circuit, a **calendar** with search, layer toggles, and adjustable terrain exaggeration.
 - Deep links: `#circuit=<id>`, e.g. `#circuit=mc-1929` for Monaco.
 

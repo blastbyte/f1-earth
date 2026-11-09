@@ -1,5 +1,7 @@
 import { CIRCUITS, SEASON, enrichCircuits } from './data.js';
-import { TERRARIUM_URL, bbox, centroid, densify, ribbonSegments, pointAt, sampleElevations } from './geo.js';
+import { TERRARIUM_URL, bbox, centroid, pointAt, sampleElevations } from './geo.js';
+import { ROAD_LIFT, buildPath, elevationPoints, setElevation, pathAt, buildMesh, buildDrive } from './track.js';
+import { createTrackLayer } from './tracklayer.js';
 import { getPhoto, trackSvg } from './photos.js';
 
 const maplibregl = window.maplibregl;
@@ -16,9 +18,9 @@ const OFM = 'https://tiles.openfreemap.org';
 const LANDMARK_CLASSES = ['attraction', 'stadium', 'castle', 'monument', 'museum', 'place_of_worship', 'theatre', 'zoo', 'park', 'harbor', 'ferry_terminal'];
 const nameField = ['coalesce', ['get', 'name:en'], ['get', 'name_en'], ['get', 'name']];
 
-const ELEV_COLOR = ['interpolate', ['linear'], ['get', 'en'],
-  0, '#2b6cff', 0.25, '#00b7d4', 0.5, '#56e39f', 0.75, '#ffd23f', 1, '#ff3b2f'];
-const ASPHALT = '#3b3f46';
+// The flat 2D outline fades away close up, where the 3D track model takes over.
+const lineOpacity = (far, model) => ['interpolate', ['linear'], ['zoom'], 5, 0, 7, far, ...(model ? [16.2, far, 17.2, 0] : [])];
+const glowOpacity = (model) => ['interpolate', ['linear'], ['zoom'], 5, 0, 7, 0.6, 14, 0.25, ...(model ? [16.2, 0.25, 17.2, 0] : [])];
 
 function buildStyle() {
   return {
@@ -56,7 +58,6 @@ function buildStyle() {
         attribution: '<a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
       },
       tracks: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: 'Circuits: <a href="https://github.com/bacinger/f1-circuits">bacinger/f1-circuits</a>' },
-      ribbon: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       starts: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       car: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } }
     },
@@ -81,7 +82,7 @@ function buildStyle() {
         id: 'track-glow', type: 'line', source: 'tracks', minzoom: 5,
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
-          'line-color': '#e10600', 'line-blur': 4, 'line-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0, 7, 0.6, 14, 0.25],
+          'line-color': '#e10600', 'line-blur': 4, 'line-opacity': glowOpacity(true),
           'line-width': ['interpolate', ['exponential', 2], ['zoom'], 6, 4, 12, 10, 17, 30]
         }
       },
@@ -90,7 +91,7 @@ function buildStyle() {
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': '#ffffff',
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0, 7, 1],
+          'line-opacity': lineOpacity(1, true),
           'line-width': ['interpolate', ['exponential', 2], ['zoom'], 6, 2.5, 12, 6, 15, 16, 18, 90]
         }
       },
@@ -99,7 +100,7 @@ function buildStyle() {
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': ['case', ['boolean', ['feature-state', 'selected'], false], '#ff2a1f', '#e10600'],
-          'line-opacity': ['interpolate', ['linear'], ['zoom'], 5, 0, 7, 1],
+          'line-opacity': lineOpacity(1, true),
           'line-width': ['interpolate', ['exponential', 2], ['zoom'], 6, 1.5, 12, 3.5, 15, 11, 18, 70]
         }
       },
@@ -111,15 +112,6 @@ function buildStyle() {
           'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
           'fill-extrusion-opacity': 0.92,
           'fill-extrusion-vertical-gradient': true
-        }
-      },
-      {
-        id: 'track-ribbon', type: 'fill-extrusion', source: 'ribbon', minzoom: 12,
-        paint: {
-          'fill-extrusion-color': ['case', ['<', ['get', 'en'], 0], '#3b3f46', ELEV_COLOR],
-          'fill-extrusion-height': ['interpolate', ['linear'], ['zoom'], 12, 0, 13.5, 2.2],
-          'fill-extrusion-base': 0.3,
-          'fill-extrusion-opacity': 0.95
         }
       },
       {
@@ -218,7 +210,8 @@ window.__map = map; // handy for debugging in the console
 
 // ---------------- Track data ----------------
 
-const tracks = {}; // id -> { coords, samples, elev, bounds, center }
+const tracks = {}; // id -> { coords, path, samples, elev, bounds, center }
+const trackLayer = createTrackLayer();
 
 async function loadTracks() {
   const res = await fetch('data/tracks.geojson');
@@ -229,8 +222,8 @@ async function loadTracks() {
     const c = byId[f.properties.id];
     if (!c) continue;
     const coords = f.geometry.coordinates;
-    const samples = densify(coords, 10);
-    tracks[c.id] = { coords, samples, elev: null, bounds: bbox(coords), center: centroid(coords), ribbon: ribbonSegments(samples) };
+    const path = buildPath(coords);
+    tracks[c.id] = { coords, path, samples: path.samples, elev: null, bounds: bbox(coords), center: centroid(coords) };
     c.center = tracks[c.id].center;
     lines.push({ type: 'Feature', id: CIRCUITS.indexOf(c), properties: { id: c.id, name: c.name }, geometry: f.geometry });
     starts.push({ type: 'Feature', properties: { id: c.id }, geometry: { type: 'Point', coordinates: coords[0] } });
@@ -238,46 +231,32 @@ async function loadTracks() {
   return { lines, starts };
 }
 
-function ribbonData() {
-  const features = [];
-  for (const [id, t] of Object.entries(tracks)) {
-    for (const f of t.ribbon) { f.properties.id = id; features.push(f); }
-  }
-  return { type: 'FeatureCollection', features };
-}
-
-function refreshRibbon() {
-  const src = map.getSource('ribbon');
-  if (src) src.setData(ribbonData());
-}
-
-async function ensureElevation(id) {
+// Samples the terrain under the track, then builds its 3D model. Always resolves:
+// if the terrain tiles cannot be loaded the model is built flat.
+function ensureElevation(id) {
   const t = tracks[id];
-  if (!t || t.elev || t.elevPromise) return t?.elevPromise;
-  t.elevPromise = sampleElevations(t.samples, 14).then((elev) => {
-    t.elev = elev;
-    let min = Infinity, max = -Infinity, gain = 0;
-    for (let i = 0; i < elev.length; i++) {
-      min = Math.min(min, elev[i]); max = Math.max(max, elev[i]);
-      if (i && elev[i] > elev[i - 1]) gain += elev[i] - elev[i - 1];
-    }
-    t.stats = { min, max, gain };
-    const span = Math.max(1, max - min);
-    t.ribbon.forEach((f, i) => {
-      const e = (elev[i] + elev[i + 1]) / 2;
-      f.properties.e = Math.round(e);
-      f.properties.en = (e - min) / span;
+  if (!t) return Promise.resolve();
+  if (!t.elevPromise) {
+    const finish = (raw) => {
+      const elev = setElevation(t.path, raw);
+      if (raw) {
+        let min = Infinity, max = -Infinity, gain = 0;
+        for (let i = 0; i < elev.length; i++) {
+          min = Math.min(min, elev[i]); max = Math.max(max, elev[i]);
+          if (i && elev[i] > elev[i - 1]) gain += elev[i] - elev[i - 1];
+        }
+        t.stats = { min, max, gain };
+        t.elev = elev;
+      }
+      trackLayer.setMesh(id, buildMesh(t.path), t.center);
+      if (selected && selected.id === id) renderElevation(selected);
+    };
+    t.elevPromise = sampleElevations(elevationPoints(t.path), 15).then(finish, (err) => {
+      console.warn('Elevation unavailable', err);
+      t.elevFailed = true;
+      finish(null);
     });
-    // fixed-colour ribbon: still keep "en" for toggling
-    refreshRibbon();
-    if (selected && selected.id === id) renderElevation(selected);
-    return elev;
-  }).catch((err) => {
-    console.warn('Elevation unavailable', err);
-    t.elevPromise = null;
-    t.elevFailed = true;
-    if (selected && selected.id === id) renderElevation(selected);
-  });
+  }
   return t.elevPromise;
 }
 
@@ -534,7 +513,7 @@ function renderElevation(c) {
       ${kmTicks.filter((k) => k % tickEvery === 0).map((k) => `<text x="${x(k * 1000)}" y="${H - 3}" text-anchor="middle">${k}${k === 0 ? ' km' : ''}</text>`).join('')}
       <line id="elev-cursor" x1="0" x2="0" y1="4" y2="${H - padB}" class="cursor" visibility="hidden"/>
     </svg>
-    <p class="hint">${isTouch ? 'Touch' : 'Hover'} the profile to locate that point on the track. Colours on the 3D track run from <span style="color:#2b6cff">low</span> to <span style="color:#ff3b2f">high</span>.</p>`;
+    <p class="hint">${isTouch ? 'Touch' : 'Hover'} the profile to locate that point on the track. Turn on “Colour track by elevation” in Layers to tint the 3D track from <span style="color:#2b6cff">low</span> to <span style="color:#ff3b2f">high</span>.</p>`;
 
   const svg = body.querySelector('svg');
   const cursor = svg.querySelector('#elev-cursor');
@@ -576,46 +555,130 @@ function lapSeconds(c) {
   return +m * 60 + +s;
 }
 
+// "Fly a lap" is driven from the cockpit: the camera sits at the driver's eye height
+// on the 3D track and follows a speed profile that brakes for corners and accelerates
+// out of them.
+const EYE_HEIGHT = 1.05; // metres above the road
+const LOOK_DISTANCE = 30; // metres from the camera to the map's centre point
+const RAD = Math.PI / 180;
+const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+const angleDiff = (a, b) => ((a - b + 540) % 360) - 180;
+const NO_PADDING = { top: 0, bottom: 0, left: 0, right: 0 };
+const ck = {
+  root: $('#cockpit'), wheel: $('#ck-wheel'), speed: $('#ck-speed'), gear: $('#ck-gear'),
+  throttle: $('#ck-throttle'), brake: $('#ck-brake'), time: $('#lap-time'), fade: $('#lap-fade')
+};
+
+function formatLapTime(sec) {
+  const m = Math.floor(sec / 60), s = sec - m * 60;
+  return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+}
+
 function toggleLap(c) {
   if (lap) { stopLap(); return; }
   stopOrbit();
-  collapseOnMobile();
+  stopSpin();
   const t = tracks[c.id];
-  const duration = (lapSeconds(c) / 2) * 1000; // 2x real time
-  const start0 = pointAt(t.samples, 0);
-  const startTime = { v: null };
-  let bearing = start0.heading;
-  lap = { c, raf: 0 };
-  map.flyTo({ center: start0.p, zoom: 16.4, pitch: 72, bearing, duration: 2200, essential: true, padding: panelPadding() });
-  map.once('moveend', () => {
-    if (!lap) return;
-    const tick = (now) => {
-      if (!lap) return;
-      if (startTime.v === null) startTime.v = now;
-      const frac = ((now - startTime.v) / duration);
-      if (frac >= 1) { stopLap(); return; }
-      const cur = pointAt(t.samples, frac);
-      const ahead = pointAt(t.samples, frac + 120 / t.samples[t.samples.length - 1].d);
-      // look slightly ahead and smooth the heading to avoid jerky turns
-      let target = ahead.heading;
-      let diff = ((target - bearing + 540) % 360) - 180;
-      bearing += diff * 0.06;
-      setCar(cur.p);
-      setElevCursor(frac);
-      map.jumpTo({ center: cur.p, bearing });
-      lap.raf = requestAnimationFrame(tick);
-    };
-    lap.raf = requestAnimationFrame(tick);
-  });
+  const me = lap = { c, raf: 0, cockpit: false };
   syncButtons();
+  collapseOnMobile();
+  const start = pathAt(t.path, 0);
+  // Fly in behind the start line, then drop into the cockpit.
+  map.flyTo({ center: start.p, zoom: 17.4, pitch: 74, bearing: start.heading, duration: 2600, essential: true, padding: NO_PADDING });
+  const arrived = new Promise((resolve) => map.once('moveend', resolve));
+  Promise.all([ensureElevation(c.id), arrived]).then(() => {
+    if (lap !== me) return;
+    ck.fade.classList.add('on');
+    setTimeout(() => { if (lap === me) driveLap(me, t); }, 260);
+  });
 }
 
-function stopLap() {
+function driveLap(me, t) {
+  const path = t.path;
+  const drive = buildDrive(path, lapSeconds(me.c));
+  me.cockpit = true;
+  me.fov = map.getVerticalFieldOfView();
+  me.maxPitch = map.getMaxPitch();
+  document.body.classList.add('lap-mode');
+  ck.root.hidden = false;
+  const aspect = map.transform.width / map.transform.height;
+  const fov = clamp((2 * Math.atan(Math.tan(43 * RAD) / aspect)) / RAD, 46, 72);
+  map.setMaxPitch(120);
+  map.setCenterClampedToGround(false);
+  map.setVerticalFieldOfView(fov);
+  requestAnimationFrame(() => ck.fade.classList.remove('on'));
+
+  let last = null;
+  let elapsed = -1.2; // sit on the grid for a moment before the launch
+  const tick = (now) => {
+    if (lap !== me) return;
+    if (last !== null) elapsed += Math.min(0.1, (now - last) / 1000);
+    last = now;
+    const st = drive.at(elapsed);
+    if (st.done) { stopLap({ overview: true }); return; }
+
+    const terrain = map.getTerrain();
+    const exag = terrain ? terrain.exaggeration ?? 1 : 0;
+    const cur = pathAt(path, st.s);
+    // Look towards where the road is going, further ahead at speed, so the view
+    // turns into a corner before the car does.
+    const ahead = pathAt(path, st.s + clamp(6 + st.v * 0.55, 6, 45));
+    const toAhead = Math.atan2(ahead.x - cur.x, ahead.y - cur.y) / RAD;
+    const bearing = cur.heading + angleDiff(toAhead, cur.heading) * 0.7;
+    const slopeAt = pathAt(path, st.s + 35);
+    const slope = Math.atan2((slopeAt.elev - cur.elev) * exag, 35) / RAD;
+    // nose dips under braking and lifts under power; lean gently into corners
+    const pitch = 86.5 + slope * 0.85 + clamp(st.a, -45, 12) * 0.035;
+    const lateralG = (cur.kappa * st.v * st.v) / 9.81;
+    const roll = -clamp(lateralG, -5, 5) * 0.7;
+    const altitude = cur.elev * exag + ROAD_LIFT + EYE_HEIGHT;
+
+    // MapLibre's camera is defined by the point it looks at, so place that point
+    // a fixed distance ahead along the line of sight.
+    const reach = LOOK_DISTANCE * Math.sin(pitch * RAD);
+    const lat = cur.p[1] + (reach * Math.cos(bearing * RAD)) / 111194.9;
+    const lng = cur.p[0] + (reach * Math.sin(bearing * RAD)) / (111194.9 * Math.cos(cur.p[1] * RAD));
+    const tr = map.transform;
+    const cameraToCentrePx = (0.5 * tr.height) / Math.tan((fov * RAD) / 2);
+    const metrePx = 512 / (2 * Math.PI * 6371008.8 * Math.cos(lat * RAD)); // pixels per metre at zoom 0
+    const zoom = Math.log2(cameraToCentrePx / (LOOK_DISTANCE * metrePx));
+    map.jumpTo({
+      center: [lng, lat], elevation: altitude - LOOK_DISTANCE * Math.cos(pitch * RAD),
+      zoom, pitch, bearing, roll, padding: NO_PADDING
+    });
+    me.pos = cur.p;
+    me.bearing = cur.heading;
+
+    const kmh = st.v * 3.6;
+    ck.speed.textContent = Math.round(kmh);
+    ck.gear.textContent = elapsed < 0 ? 'N' : clamp(1 + Math.floor(kmh / 42), 1, 8);
+    ck.wheel.setAttribute('transform', `rotate(${clamp((Math.atan(3.6 * cur.kappa) / RAD) * 11, -150, 150).toFixed(1)} 500 520)`);
+    ck.throttle.style.transform = `scaleY(${clamp(st.a / 9, 0, 1).toFixed(2)})`;
+    ck.brake.style.transform = `scaleY(${clamp(-st.a / 35, 0, 1).toFixed(2)})`;
+    ck.time.textContent = formatLapTime(Math.max(0, elapsed));
+    setElevCursor(st.s / path.total);
+    me.raf = requestAnimationFrame(tick);
+  };
+  me.raf = requestAnimationFrame(tick);
+}
+
+function stopLap({ overview = false } = {}) {
   if (!lap) return;
-  cancelAnimationFrame(lap.raf);
+  const me = lap;
+  cancelAnimationFrame(me.raf);
   lap = null;
-  setCar(null);
+  ck.fade.classList.remove('on');
+  if (me.cockpit) {
+    // back to a normal map camera, just behind where the car was
+    document.body.classList.remove('lap-mode');
+    ck.root.hidden = true;
+    map.setCenterClampedToGround(true);
+    map.setVerticalFieldOfView(me.fov);
+    if (me.pos) map.jumpTo({ center: me.pos, zoom: 17.2, pitch: 72, bearing: me.bearing, roll: 0 });
+    map.setMaxPitch(me.maxPitch);
+  }
   syncButtons();
+  if (overview) flyToCircuit(me.c);
 }
 
 function toggleOrbit(c) {
@@ -736,7 +799,8 @@ document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('cli
 }));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (!$('#calendar').hidden) closeDrawer();
+    if (lap) stopLap({ overview: true });
+    else if (!$('#calendar').hidden) closeDrawer();
     else if (!$('#panel').hidden) document.querySelector('[data-close="panel"]').click();
   }
 });
@@ -746,10 +810,15 @@ document.querySelector('.sheet-handle').addEventListener('click', () => $('#pane
 
 function setVis(layer, on) { if (map.getLayer(layer)) map.setLayoutProperty(layer, 'visibility', on ? 'visible' : 'none'); }
 $('#opt-buildings').onchange = (e) => setVis('buildings', e.target.checked);
-$('#opt-ribbon').onchange = (e) => setVis('track-ribbon', e.target.checked);
+$('#opt-ribbon').onchange = (e) => {
+  trackLayer.visible = e.target.checked;
+  map.setPaintProperty('track-glow', 'line-opacity', glowOpacity(e.target.checked));
+  for (const l of ['track-casing', 'track-line']) map.setPaintProperty(l, 'line-opacity', lineOpacity(1, e.target.checked));
+  map.triggerRepaint();
+};
 $('#opt-labels').onchange = (e) => ['poi', 'places', 'water-names', 'track-name', 'start-finish-label'].forEach((l) => setVis(l, e.target.checked));
-$('#opt-elevcolor').onchange = (e) => map.setPaintProperty('track-ribbon', 'fill-extrusion-color',
-  e.target.checked ? ['case', ['<', ['get', 'en'], 0], '#3b3f46', ELEV_COLOR] : ASPHALT);
+$('#opt-elevcolor').onchange = (e) => { trackLayer.tint = e.target.checked; map.triggerRepaint(); };
+$('#lap-exit').onclick = () => stopLap({ overview: true });
 const exag = () => +$('#opt-exag').value;
 $('#opt-exag').oninput = () => {
   $('#opt-exag-out').textContent = exag().toFixed(1) + '×';
@@ -788,7 +857,7 @@ map.on('load', async () => {
   const { lines, starts } = await loadTracks();
   map.getSource('tracks').setData({ type: 'FeatureCollection', features: lines });
   map.getSource('starts').setData({ type: 'FeatureCollection', features: starts });
-  refreshRibbon();
+  map.addLayer(trackLayer, 'start-finish');
   createMarkers();
   renderCalendar();
   updateMarkers();
@@ -799,7 +868,7 @@ map.on('load', async () => {
     const c = f && byId[f.properties.id];
     if (c && c !== selected) selectCircuit(c);
   };
-  for (const l of ['track-line', 'track-ribbon']) {
+  for (const l of ['track-line']) {
     map.on('click', l, clickTrack);
     map.on('mouseenter', l, () => { map.getCanvas().style.cursor = 'pointer'; });
     map.on('mouseleave', l, () => { map.getCanvas().style.cursor = ''; });
