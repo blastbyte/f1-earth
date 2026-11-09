@@ -1,6 +1,6 @@
 import { CIRCUITS, SEASON, enrichCircuits } from './data.js';
-import { TERRARIUM_URL, bbox, centroid, pointAt, sampleElevations } from './geo.js';
-import { ROAD_LIFT, buildPath, elevationPoints, setElevation, pathAt, buildMesh, buildDrive } from './track.js';
+import { bbox, centroid, pointAt, sampleElevations, loadTile, tileBounds, carveRoad } from './geo.js';
+import { ROAD_LIFT, TRACK_WIDTH, buildPath, elevationPoints, setElevation, pathAt, buildMesh, buildDrive } from './track.js';
 import { createTrackLayer } from './tracklayer.js';
 import { getPhoto, trackSvg } from './photos.js';
 
@@ -46,7 +46,7 @@ function buildStyle() {
       },
       dem: {
         type: 'raster-dem',
-        tiles: [TERRARIUM_URL],
+        tiles: ['f1dem://{z}/{x}/{y}'],
         encoding: 'terrarium',
         tileSize: 256,
         maxzoom: 15,
@@ -211,6 +211,8 @@ window.__map = map; // handy for debugging in the console
 // ---------------- Track data ----------------
 
 const tracks = {}; // id -> { coords, path, samples, elev, bounds, center }
+let tracksLoaded;
+const tracksReady = new Promise((resolve) => { tracksLoaded = resolve; });
 const trackLayer = createTrackLayer();
 
 async function loadTracks() {
@@ -228,8 +230,33 @@ async function loadTracks() {
     lines.push({ type: 'Feature', id: CIRCUITS.indexOf(c), properties: { id: c.id, name: c.name }, geometry: f.geometry });
     starts.push({ type: 'Feature', properties: { id: c.id }, geometry: { type: 'Point', coordinates: coords[0] } });
   }
+  tracksLoaded();
   return { lines, starts };
 }
+
+// The map's terrain tiles go through this handler, which cuts a smooth road bed for
+// each circuit into the elevation data. The terrain data is too coarse to contain the
+// real road, so without this the ground would be bumpy under the track and beside it.
+const CARVE_MIN_ZOOM = 13;
+maplibregl.addProtocol('f1dem', async (params) => {
+  const [z, x, y] = params.url.slice('f1dem://'.length).split('/').map(Number);
+  const tile = await loadTile(z, x, y, false);
+  let data = tile.data;
+  if (z >= CARVE_MIN_ZOOM) {
+    await tracksReady;
+    const [[w, s], [e, n]] = tileBounds(z, x, y);
+    const pad = 0.002; // roughly 200 m
+    for (const [id, t] of Object.entries(tracks)) {
+      const [[tw, ts], [te, tn]] = t.bounds;
+      if (tw > e + pad || te < w - pad || ts > n + pad || tn < s - pad) continue;
+      await ensureElevation(id);
+      if (!t.elev) continue;
+      if (data === tile.data) data = new Uint8ClampedArray(tile.data);
+      carveRoad(data, tile.size, z, x, y, t.samples.map((sm) => sm.p), t.elev, TRACK_WIDTH / 2);
+    }
+  }
+  return { data: await createImageBitmap(new ImageData(data, tile.size, tile.size)) };
+});
 
 // Samples the terrain under the track, then builds its 3D model. Always resolves:
 // if the terrain tiles cannot be loaded the model is built flat.
@@ -606,13 +633,18 @@ function driveLap(me, t) {
   map.setMaxPitch(120);
   map.setCenterClampedToGround(false);
   map.setVerticalFieldOfView(fov);
+  // Drive at true scale: the exaggerated terrain used elsewhere makes every rise a ramp.
+  me.terrain = map.getTerrain();
+  if (me.terrain) map.setTerrain({ ...me.terrain, exaggeration: 1 });
   requestAnimationFrame(() => ck.fade.classList.remove('on'));
 
   let last = null;
+  let pitchNow = null, rollNow = 0;
   let elapsed = -1.2; // sit on the grid for a moment before the launch
   const tick = (now) => {
     if (lap !== me) return;
-    if (last !== null) elapsed += Math.min(0.1, (now - last) / 1000);
+    const dt = last === null ? 0 : Math.min(0.1, (now - last) / 1000);
+    elapsed += dt;
     last = now;
     const st = drive.at(elapsed);
     if (st.done) { stopLap({ overview: true }); return; }
@@ -625,12 +657,16 @@ function driveLap(me, t) {
     const ahead = pathAt(path, st.s + clamp(6 + st.v * 0.55, 6, 45));
     const toAhead = Math.atan2(ahead.x - cur.x, ahead.y - cur.y) / RAD;
     const bearing = cur.heading + angleDiff(toAhead, cur.heading) * 0.7;
-    const slopeAt = pathAt(path, st.s + 35);
-    const slope = Math.atan2((slopeAt.elev - cur.elev) * exag, 35) / RAD;
-    // nose dips under braking and lifts under power; lean gently into corners
-    const pitch = 86.5 + slope * 0.85 + clamp(st.a, -45, 12) * 0.035;
+    const slopeAt = pathAt(path, st.s + 60);
+    const slope = Math.atan2((slopeAt.elev - cur.elev) * exag, 60) / RAD;
+    // Nose dips under braking and lifts under power; lean gently into corners.
+    // Both are eased over time so the horizon never snaps.
+    const pitchTarget = 86.5 + slope * 0.5 + clamp(st.a, -45, 12) * 0.035;
     const lateralG = (cur.kappa * st.v * st.v) / 9.81;
-    const roll = -clamp(lateralG, -5, 5) * 0.7;
+    const ease = 1 - Math.exp(-dt / 0.35);
+    pitchNow = pitchNow === null ? pitchTarget : pitchNow + (pitchTarget - pitchNow) * ease;
+    rollNow += (-clamp(lateralG, -5, 5) * 0.7 - rollNow) * ease;
+    const pitch = pitchNow, roll = rollNow;
     const altitude = cur.elev * exag + ROAD_LIFT + EYE_HEIGHT;
 
     // MapLibre's camera is defined by the point it looks at, so place that point
@@ -674,6 +710,7 @@ function stopLap({ overview = false } = {}) {
     ck.root.hidden = true;
     map.setCenterClampedToGround(true);
     map.setVerticalFieldOfView(me.fov);
+    if (me.terrain && map.getTerrain()) map.setTerrain({ ...me.terrain, exaggeration: exag() });
     if (me.pos) map.jumpTo({ center: me.pos, zoom: 17.2, pitch: 72, bearing: me.bearing, roll: 0 });
     map.setMaxPitch(me.maxPitch);
   }
