@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+  <title>F1 Earth 2026</title>
+  <meta name="description" content="Explore every circuit on the 2026 Formula 1 calendar on an interactive 3D globe, with terrain, 3D buildings and track elevation." />
+  <meta name="theme-color" content="#05070d" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%230b3d6e'/><path d='M18 62 Q35 20 58 40 T84 38' fill='none' stroke='%23e10600' stroke-width='9' stroke-linecap='round'/></svg>" />
+  <link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div id="map" aria-label="3D globe of the 2026 Formula 1 circuits"></div>
+
+  <header class="brand">
+    <div class="brand-mark" aria-hidden="true"></div>
+    <div>
+      <h1>F1 Earth</h1>
+      <p><span id="season-label">2026 season</span><span class="race-count"> · <span id="race-count"></span></span></p>
+    </div>
+  </header>
+
+  <div class="toolbar" role="toolbar" aria-label="Map tools">
+    <button id="btn-calendar" class="tool" title="Race calendar" aria-label="Race calendar">
+      <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
+    </button>
+    <button id="btn-home" class="tool" title="Back to globe" aria-label="Back to globe">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/></svg>
+    </button>
+    <button id="btn-layers" class="tool" title="Layers" aria-label="Layers" aria-expanded="false">
+      <svg viewBox="0 0 24 24"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg>
+    </button>
+  </div>
+
+  <div id="layers" class="popover" hidden>
+    <label><input type="checkbox" id="opt-buildings" checked /> 3D buildings</label>
+    <label><input type="checkbox" id="opt-terrain" checked /> Terrain elevation</label>
+    <label><input type="checkbox" id="opt-ribbon" checked /> 3D track model</label>
+    <label><input type="checkbox" id="opt-elevcolor" /> Colour track by elevation</label>
+    <label><input type="checkbox" id="opt-labels" checked /> Labels &amp; landmarks</label>
+    <label class="range">Terrain exaggeration <input type="range" id="opt-exag" min="1" max="3" step="0.1" value="1.5" /><output id="opt-exag-out">1.5×</output></label>
+  </div>
+
+  <aside id="calendar" class="drawer" hidden aria-label="2026 race calendar">
+    <div class="drawer-head">
+      <h2>2026 Calendar</h2>
+      <button class="icon-btn" data-close="calendar" aria-label="Close calendar">✕</button>
+    </div>
+    <input id="search" type="search" placeholder="Search circuit, city or country…" autocomplete="off" />
+    <ol id="race-list"></ol>
+  </aside>
+
+  <aside id="panel" class="panel" hidden aria-live="polite">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <button class="icon-btn panel-close" data-close="panel" aria-label="Close circuit info">✕</button>
+    <div id="panel-body"></div>
+  </aside>
+
+  <div id="zoom-hint" class="chip" hidden></div>
+  <div id="help" class="help">
+    <span class="desktop-only">Drag to rotate · Scroll to zoom · Right-drag or Ctrl+drag to tilt</span>
+    <span class="touch-only">Drag to rotate · Pinch to zoom · Two-finger drag to tilt</span>
+    · Tap a circuit for details
+  </div>
+
+  <!-- First-person view for "Fly a lap" -->
+  <div id="cockpit" class="cockpit" hidden>
+    <svg class="cockpit-car" viewBox="0 0 1000 600" preserveAspectRatio="xMidYMax meet" aria-hidden="true">
+      <defs>
+        <linearGradient id="ck-body" x1="0" x2="1"><stop offset="0" stop-color="#7d0b06"/><stop offset=".5" stop-color="#d81810"/><stop offset="1" stop-color="#7d0b06"/></linearGradient>
+        <linearGradient id="ck-carbon" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#2a2d33"/><stop offset="1" stop-color="#0c0d10"/></linearGradient>
+        <linearGradient id="ck-tyre" x1="0" x2="1"><stop offset="0" stop-color="#101114"/><stop offset=".5" stop-color="#2b2d32"/><stop offset="1" stop-color="#101114"/></linearGradient>
+      </defs>
+      <!-- front tyres -->
+      <rect x="128" y="352" width="118" height="150" rx="34" fill="url(#ck-tyre)"/>
+      <rect x="754" y="352" width="118" height="150" rx="34" fill="url(#ck-tyre)"/>
+      <path d="M140 392h94M140 432h94M140 472h94M766 392h94M766 432h94M766 472h94" stroke="#3a3d44" stroke-width="3"/>
+      <!-- suspension arms -->
+      <path d="M246 412 430 452M246 462 420 492M754 412 570 452M754 462 580 492" stroke="#17191d" stroke-width="9" stroke-linecap="round"/>
+      <!-- nose and chassis -->
+      <path d="M462 372 Q500 356 538 372 L604 600 H396Z" fill="url(#ck-body)"/>
+      <path d="M492 366 Q500 362 508 366 L524 600 H476Z" fill="#fff" opacity=".85"/>
+      <!-- cockpit surround -->
+      <path d="M250 600 Q300 500 420 486 H580 Q700 500 750 600Z" fill="url(#ck-carbon)"/>
+      <!-- halo: centre pillar and hoop -->
+      <path d="M494 500 L497 84 H503 L506 500Z" fill="#15171b"/>
+      <path d="M-60 150 Q200 66 500 58 Q800 66 1060 150 L1060 112 Q800 30 500 22 Q200 30 -60 112Z" fill="#1b1d22"/>
+      <path d="M-60 150 Q200 66 500 58 Q800 66 1060 150" fill="none" stroke="#3b3e46" stroke-width="2"/>
+      <!-- steering wheel -->
+      <g id="ck-wheel">
+        <path d="M388 478 Q388 446 426 446 H574 Q612 446 612 478 V556 Q612 592 574 592 H426 Q388 592 388 556Z" fill="#16181c" stroke="#33363d" stroke-width="3"/>
+        <rect x="372" y="462" width="34" height="116" rx="15" fill="#0b0c0e"/>
+        <rect x="594" y="462" width="34" height="116" rx="15" fill="#0b0c0e"/>
+        <rect x="440" y="462" width="120" height="74" rx="8" fill="#05070b" stroke="#444852" stroke-width="2"/>
+        <text id="ck-gear" x="500" y="506" text-anchor="middle" class="ck-gear">N</text>
+        <text id="ck-speed" x="500" y="528" text-anchor="middle" class="ck-speed">0</text>
+        <circle cx="422" cy="560" r="8" fill="#e10600"/><circle cx="578" cy="560" r="8" fill="#3ddc84"/>
+        <circle cx="462" cy="566" r="7" fill="#ffd23f"/><circle cx="538" cy="566" r="7" fill="#2b6cff"/>
+        <rect x="496" y="446" width="8" height="14" fill="#ffd23f"/>
+      </g>
+    </svg>
+    <div class="lap-hud">
+      <button id="lap-exit" class="btn">■ Exit lap</button>
+      <span class="lap-time" id="lap-time">0:00.0</span>
+      <span class="pedals" aria-hidden="true"><i class="pedal brake"><b id="ck-brake"></b></i><i class="pedal throttle"><b id="ck-throttle"></b></i></span>
+    </div>
+  </div>
+  <div id="lap-fade" class="lap-fade"></div>
+
+  <script src="vendor/maplibre-gl/maplibre-gl.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
